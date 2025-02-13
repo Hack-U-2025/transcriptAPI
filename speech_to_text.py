@@ -1,28 +1,21 @@
-import os
-import time
-from google.cloud import speech
+import numpy as np
 import pyaudio
+import deepspeech
 import websockets
 import asyncio
 import json
 
+# DeepSpeechモデルの設定
+MODEL_FILE_PATH = "path/to/your/deepspeech-0.9.3-models.pbmm"
+SCORER_FILE_PATH = "path/to/your/deepspeech-0.9.3-models.scorer"
+
 # 音声設定
 RATE = 16000
-CHUNK = int(RATE / 10)  # 100ms
+CHUNK = 1024
 
-# Speech-to-Text クライアントの初期化
-client = speech.SpeechClient()
-
-config = speech.RecognitionConfig(
-    encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-    sample_rate_hertz=RATE,
-    language_code="ja-JP",
-    enable_automatic_punctuation=True,
-)
-
-streaming_config = speech.StreamingRecognitionConfig(
-    config=config, interim_results=True
-)
+# DeepSpeechモデルの初期化
+model = deepspeech.Model(MODEL_FILE_PATH)
+model.enableExternalScorer(SCORER_FILE_PATH)
 
 
 # WebSocket接続用の関数
@@ -30,8 +23,8 @@ async def send_to_unity(websocket, text):
     await websocket.send(json.dumps({"text": text}))
 
 
-# マイク入力のストリーム設定
-def mic_stream():
+# 音声ストリーム処理
+def audio_stream():
     audio = pyaudio.PyAudio()
     stream = audio.open(
         format=pyaudio.paInt16,
@@ -41,34 +34,27 @@ def mic_stream():
         frames_per_buffer=CHUNK,
     )
 
-    while True:
-        data = stream.read(CHUNK)
-        yield speech.StreamingRecognizeRequest(audio_content=data)
+    return stream
 
 
 # メイン処理
 async def main():
-    uri = "ws://localhost:8888"  # Unityのサーバーアドレス
+    uri = "ws://localhost:8080"  # Unityのサーバーアドレス
     async with websockets.connect(uri) as websocket:
         print("Connected to Unity")
 
-        responses = client.streaming_recognize(streaming_config, mic_stream())
+        stream = audio_stream()
+        context = model.createStream()
 
-        for response in responses:
-            if not response.results:
-                continue
+        while True:
+            data = stream.read(CHUNK)
+            audio_data = np.frombuffer(data, dtype=np.int16)
+            context.feedAudioContent(audio_data)
+            text = context.intermediateDecode()
 
-            result = response.results[0]
-            if not result.alternatives:
-                continue
-
-            transcript = result.alternatives[0].transcript
-
-            if result.is_final:
-                print(f"Final: {transcript}")
-                await send_to_unity(websocket, transcript)
-            else:
-                print(f"Interim: {transcript}")
+            if text:
+                print(f"Recognized: {text}")
+                await send_to_unity(websocket, text)
 
 
 if __name__ == "__main__":
