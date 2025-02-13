@@ -1,0 +1,33 @@
+# Python関連
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+*.so
+
+# Google Cloud APIキー
+your-key-file.json
+
+# 音声ファイル
+*.wav
+*.mp3
+
+# ログファイル
+*.log
+
+# OS生成ファイル
+.DS_Store
+Thumbs.db
+
+# エディタ生成ファイル
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Unityプロジェクトファイル（フロントエンド側にあるため）
+*.unity
+*.meta
+*.asset
+*.prefab
