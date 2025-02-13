@@ -1,5 +1,3 @@
-完全無料のAPIを使用し、日本語でリアルタイム文字起こしを行うシステムを構築します。この要件を満たすために、Mozillaが開発したオープンソースの音声認識モデルである「DeepSpeech」を使用します。
-
 ## 1. 環境設定
 
 1. Python 3.11.9がインストールされていることを確認します。
@@ -18,12 +16,13 @@ pip install deepspeech pyaudio numpy websockets
 `speech_to_text.py`ファイルを作成し、以下のコードを記述します:
 
 ```python
+#!/usr/bin/env python3
+import asyncio
+import websockets
+import json
 import numpy as np
 import pyaudio
 import deepspeech
-import websockets
-import asyncio
-import json
 
 # DeepSpeechモデルの設定
 MODEL_FILE_PATH = 'path/to/your/deepspeech-0.9.3-models.pbmm'
@@ -37,10 +36,6 @@ CHUNK = 1024
 model = deepspeech.Model(MODEL_FILE_PATH)
 model.enableExternalScorer(SCORER_FILE_PATH)
 
-# WebSocket接続用の関数
-async def send_to_unity(websocket, text):
-    await websocket.send(json.dumps({"text": text}))
-
 # 音声ストリーム処理
 def audio_stream():
     audio = pyaudio.PyAudio()
@@ -49,27 +44,45 @@ def audio_stream():
                         rate=RATE,
                         input=True,
                         frames_per_buffer=CHUNK)
-    
     return stream
 
-# メイン処理
-async def main():
-    uri = "ws://localhost:8080"  # Unityのサーバーアドレス
-    async with websockets.connect(uri) as websocket:
-        print("Connected to Unity")
+# 文字起こし処理
+def transcribe():
+    stream = audio_stream()
+    context = model.createStream()
+    
+    # 3秒間の音声を録音して文字起こし
+    for _ in range(int(RATE / CHUNK * 3)):
+        data = stream.read(CHUNK)
+        audio_data = np.frombuffer(data, dtype=np.int16)
+        context.feedAudioContent(audio_data)
+    
+    text = context.finishStream()
+    return {"text": text}
 
-        stream = audio_stream()
-        context = model.createStream()
-
+async def handle_connection(websocket):
+    """
+    クライアントから接続があるごとに呼び出されるコールバック関数
+    """
+    print("クライアントが接続しました")
+    try:
         while True:
-            data = stream.read(CHUNK)
-            audio_data = np.frombuffer(data, dtype=np.int16)
-            context.feedAudioContent(audio_data)
-            text = context.intermediateDecode()
-            
-            if text:
-                print(f"Recognized: {text}")
-                await send_to_unity(websocket, text)
+            # 音声を録音し、文字起こしを実行する
+            result = await asyncio.to_thread(transcribe)
+            # 結果の辞書を JSON 文字列に変換（ensure_ascii=False で日本語もそのまま表示）
+            json_string = json.dumps(result, ensure_ascii=False)
+            print(f"送信するデータ: {json_string}")
+            await websocket.send(json_string)
+            print("データを送信しました")
+            # 3秒ごとに処理を繰り返す
+    except websockets.exceptions.ConnectionClosed:
+        print("クライアントが切断されました")
+
+async def main():
+    # localhost の 8765 ポートで WebSocket サーバーを起動
+    async with websockets.serve(handle_connection, "localhost", 8765):
+        print("WebSocket サーバーが起動しました。クライアントの接続を待っています...")
+        await asyncio.Future()  # 永続的に実行
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -77,17 +90,67 @@ if __name__ == "__main__":
 
 ## 3. Unity側の設定
 
-UnityプロジェクトでWebSocketサーバーを設定し、受信したテキストを表示するスクリプトを作成します。この部分はUnity側で実装する必要があります。
+Unityプロジェクトで以下のC#スクリプトを作成し、適当なGameObjectにアタッチします。
+
+```csharp
+using UnityEngine;
+using System;
+using System.Collections;
+using WebSocketSharp;
+
+public class WebSocketClient : MonoBehaviour
+{
+    private WebSocket ws;
+
+    void Start()
+    {
+        ws = new WebSocket("ws://localhost:8765");
+
+        ws.OnMessage += (sender, e) =>
+        {
+            Debug.Log("Received: " + e.Data);
+            // ここで受信したテキストを処理（例：UI表示など）
+        };
+
+        ws.OnOpen += (sender, e) =>
+        {
+            Debug.Log("WebSocket Open");
+        };
+
+        ws.OnError += (sender, e) =>
+        {
+            Debug.LogError("WebSocket Error Message: " + e.Message);
+        };
+
+        ws.OnClose += (sender, e) =>
+        {
+            Debug.Log("WebSocket Close");
+        };
+
+        ws.Connect();
+    }
+
+    void OnDestroy()
+    {
+        if (ws != null)
+        {
+            ws.Close();
+        }
+    }
+}
+```
+
+Unity側でWebSocketSharpライブラリを導入する必要があります。
 
 ## 4. システムの実行
 
-1. Unityプロジェクトを実行し、WebSocketサーバーを起動します。
-
-2. コマンドプロンプトで以下のコマンドを実行し、Pythonスクリプトを起動します:
+1. コマンドプロンプトで以下のコマンドを実行し、Pythonスクリプトを起動します:
 
 ```bash
 python speech_to_text.py
 ```
+
+2. Unityプロジェクトを実行します。
 
 3. マイクに向かって話すと、リアルタイムで文字起こしが行われ、Unity側に送信されます。
 
@@ -101,16 +164,6 @@ project_root/
 └── deepspeech-0.9.3-models.scorer
 ```
 
-このシステムは、DeepSpeechを使用して完全無料で日本語のリアルタイム文字起こしを実現します。マイクからの入力をリアルタイムで処理し、結果をWebSocketを通じてUnityに送信します。DeepSpeechは軽量なモデルであり、GPUなしのノートPCでも比較的高速に動作します。環境設定から実装まで、一貫性のある手順で説明しました。必要に応じて、Unity側の実装やエラーハンドリングなどを追加することで、より堅牢なシステムを構築できます。
-
-Citations:
-[1] <https://mojiokoshi3.com/ja/post/free-9-tools-ai-transcription/>
-[2] <https://note.com/nyosubro/n/n8f4a670c6953>
-[3] <https://qiita.com/ryosuke_ohori/items/9634c1fd8a9cc9ff7c36>
-[4] <https://withteam.jp/mojiokoshi/blog/application%EF%BC%BFtool/>
-[5] <https://jitera.com/ja/insights/24922>
-[6] <https://qiita.com/ysugiyama12/items/bf246e80ae4d1dc16441>
-[7] <https://cloud.google.com/speech-to-text?hl=ja>
-[8] <https://ainow.jp/deepgram/>
+このシステムは、DeepSpeechを使用して完全無料で日本語のリアルタイム文字起こしを実現し、WebSocketを通じてUnityフロントエンドと通信を行います。マイクからの入力を3秒ごとに処理し、結果をJSON形式でUnityに送信します。DeepSpeechは軽量なモデルであり、GPUなしのノートPCでも比較的高速に動作します。環境設定から実装まで、一貫性のある手順で説明しました。必要に応じて、エラーハンドリングやUI実装などを追加することで、より堅牢なシステムを構築できます。
 
 ---
