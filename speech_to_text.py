@@ -2,66 +2,76 @@
 import asyncio
 import websockets
 import json
-import numpy as np
+import os
+from google.cloud import speech
 import pyaudio
-import deepspeech
 
-# DeepSpeechモデルの設定
-MODEL_FILE_PATH = "path/to/your/deepspeech-0.9.3-models.pbmm"
-SCORER_FILE_PATH = "path/to/your/deepspeech-0.9.3-models.scorer"
+# Google Cloud認証設定
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "google_cloud_key.json"
 
 # 音声設定
 RATE = 16000
-CHUNK = 1024
+CHUNK = int(RATE / 10)  # 100ms
 
-# DeepSpeechモデルの初期化
-model = deepspeech.Model(MODEL_FILE_PATH)
-model.enableExternalScorer(SCORER_FILE_PATH)
+# Speech clientの初期化
+client = speech.SpeechClient()
+
+config = speech.RecognitionConfig(
+    encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+    sample_rate_hertz=RATE,
+    language_code="ja-JP",
+)
+
+streaming_config = speech.StreamingRecognitionConfig(
+    config=config, interim_results=True
+)
 
 
-# 音声ストリーム処理
-def audio_stream():
-    audio = pyaudio.PyAudio()
-    stream = audio.open(
+def get_api_key():
+    """APIキーを取得する関数"""
+    with open("google_cloud_key.json", "r") as f:
+        return json.load(f)["private_key"]
+
+
+# マイクストリームを生成する関数
+def mic_stream():
+    audio_interface = pyaudio.PyAudio()
+    audio_stream = audio_interface.open(
         format=pyaudio.paInt16,
         channels=1,
         rate=RATE,
         input=True,
         frames_per_buffer=CHUNK,
     )
-    return stream
+
+    while True:
+        data = audio_stream.read(CHUNK)
+        yield speech.StreamingRecognizeRequest(audio_content=data)
 
 
-# 文字起こし処理
-def transcribe():
-    stream = audio_stream()
-    context = model.createStream()
+async def transcribe():
+    """音声認識を行い、テキストを返す関数"""
+    api_key = get_api_key()
+    stream = client.streaming_recognize(streaming_config, mic_stream())
 
-    # 3秒間の音声を録音して文字起こし
-    for _ in range(int(RATE / CHUNK * 3)):
-        data = stream.read(CHUNK)
-        audio_data = np.frombuffer(data, dtype=np.int16)
-        context.feedAudioContent(audio_data)
-
-    text = context.finishStream()
-    return {"text": text}
+    for response in stream:
+        for result in response.results:
+            if result.is_final:
+                return {"text": result.alternatives[0].transcript}
 
 
 async def handle_connection(websocket):
-    """
-    クライアントから接続があるごとに呼び出されるコールバック関数
-    """
+    """クライアントとの接続を処理するコールバック関数"""
     print("クライアントが接続しました")
     try:
         while True:
-            # 音声を録音し、文字起こしを実行する
-            result = await asyncio.to_thread(transcribe)
-            # 結果の辞書を JSON 文字列に変換（ensure_ascii=False で日本語もそのまま表示）
+            # 音声認識を実行
+            result = await transcribe()
+            # 結果を JSON 文字列に変換
             json_string = json.dumps(result, ensure_ascii=False)
             print(f"送信するデータ: {json_string}")
             await websocket.send(json_string)
             print("データを送信しました")
-            # 3秒ごとに処理を繰り返す
     except websockets.exceptions.ConnectionClosed:
         print("クライアントが切断されました")
 

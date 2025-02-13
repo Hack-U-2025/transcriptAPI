@@ -2,79 +2,114 @@
 
 1. Python 3.11.9がインストールされていることを確認します。
 
-2. 必要なライブラリをインストールします:
+2. 新しいプロジェクトフォルダを作成し、その中に移動します。
 
-```bash
-pip install deepspeech pyaudio numpy websockets
+3. 仮想環境を作成し、有効化します：
+
+```
+python -m venv venv
+venv\Scripts\activate
 ```
 
-3. DeepSpeechの日本語モデルをダウンロードします:
-   - <https://github.com/mozilla/DeepSpeech/releases> から最新の日本語モデルをダウンロードし、プロジェクトフォルダに配置します。
+4. 必要なライブラリをインストールします：
 
-## 2. 音声入力とDeepSpeech連携
+```
+pip install google-cloud-speech pyaudio websockets
+```
 
-`speech_to_text.py`ファイルを作成し、以下のコードを記述します:
+5. `requirements.txt` ファイルを作成します：
+
+```
+google-cloud-speech==2.21.0
+pyaudio==0.2.13
+websockets==11.0.3
+```
+
+## 2. Google Cloud設定
+
+1. Google Cloud Consoleにアクセスし、新しいプロジェクトを作成します。
+
+2. Speech-to-Text APIを有効にします。
+
+3. サービスアカウントを作成し、JSONキーファイルをダウンロードします。
+
+4. ダウンロードしたJSONキーファイルを `google_cloud_key.json` という名前でプロジェクトフォルダに配置します。
+
+## 3. 音声認識とWebSocket通信の実装
+
+`speech_to_text.py` ファイルを作成し、以下のコードを記述します：
 
 ```python
 #!/usr/bin/env python3
 import asyncio
 import websockets
 import json
-import numpy as np
+import os
+from google.cloud import speech
 import pyaudio
-import deepspeech
 
-# DeepSpeechモデルの設定
-MODEL_FILE_PATH = 'path/to/your/deepspeech-0.9.3-models.pbmm'
-SCORER_FILE_PATH = 'path/to/your/deepspeech-0.9.3-models.scorer'
+# Google Cloud認証設定
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "google_cloud_key.json"
 
 # 音声設定
 RATE = 16000
-CHUNK = 1024
+CHUNK = int(RATE / 10)  # 100ms
 
-# DeepSpeechモデルの初期化
-model = deepspeech.Model(MODEL_FILE_PATH)
-model.enableExternalScorer(SCORER_FILE_PATH)
+# Speech clientの初期化
+client = speech.SpeechClient()
 
-# 音声ストリーム処理
-def audio_stream():
-    audio = pyaudio.PyAudio()
-    stream = audio.open(format=pyaudio.paInt16,
-                        channels=1,
-                        rate=RATE,
-                        input=True,
-                        frames_per_buffer=CHUNK)
-    return stream
+config = speech.RecognitionConfig(
+    encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+    sample_rate_hertz=RATE,
+    language_code="ja-JP",
+)
 
-# 文字起こし処理
-def transcribe():
-    stream = audio_stream()
-    context = model.createStream()
+streaming_config = speech.StreamingRecognitionConfig(
+    config=config, interim_results=True
+)
+
+def get_api_key():
+    """APIキーを取得する関数"""
+    with open('google_cloud_key.json', 'r') as f:
+        return json.load(f)['private_key']
+
+# マイクストリームを生成する関数
+def mic_stream():
+    audio_interface = pyaudio.PyAudio()
+    audio_stream = audio_interface.open(
+        format=pyaudio.paInt16,
+        channels=1,
+        rate=RATE,
+        input=True,
+        frames_per_buffer=CHUNK,
+    )
+
+    while True:
+        data = audio_stream.read(CHUNK)
+        yield speech.StreamingRecognizeRequest(audio_content=data)
+
+async def transcribe():
+    """音声認識を行い、テキストを返す関数"""
+    api_key = get_api_key()
+    stream = client.streaming_recognize(streaming_config, mic_stream())
     
-    # 3秒間の音声を録音して文字起こし
-    for _ in range(int(RATE / CHUNK * 3)):
-        data = stream.read(CHUNK)
-        audio_data = np.frombuffer(data, dtype=np.int16)
-        context.feedAudioContent(audio_data)
-    
-    text = context.finishStream()
-    return {"text": text}
+    for response in stream:
+        for result in response.results:
+            if result.is_final:
+                return {"text": result.alternatives[0].transcript}
 
 async def handle_connection(websocket):
-    """
-    クライアントから接続があるごとに呼び出されるコールバック関数
-    """
+    """クライアントとの接続を処理するコールバック関数"""
     print("クライアントが接続しました")
     try:
         while True:
-            # 音声を録音し、文字起こしを実行する
-            result = await asyncio.to_thread(transcribe)
-            # 結果の辞書を JSON 文字列に変換（ensure_ascii=False で日本語もそのまま表示）
+            # 音声認識を実行
+            result = await transcribe()
+            # 結果を JSON 文字列に変換
             json_string = json.dumps(result, ensure_ascii=False)
             print(f"送信するデータ: {json_string}")
             await websocket.send(json_string)
             print("データを送信しました")
-            # 3秒ごとに処理を繰り返す
     except websockets.exceptions.ConnectionClosed:
         print("クライアントが切断されました")
 
@@ -88,15 +123,15 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 3. Unity側の設定
+## 4. Unity側の設定
 
-Unityプロジェクトで以下のC#スクリプトを作成し、適当なGameObjectにアタッチします。
+Unity プロジェクトで以下の C# スクリプトを作成し、適当な GameObject にアタッチします。
 
 ```csharp
 using UnityEngine;
 using System;
-using System.Collections;
 using WebSocketSharp;
+using Newtonsoft.Json.Linq;
 
 public class WebSocketClient : MonoBehaviour
 {
@@ -108,7 +143,9 @@ public class WebSocketClient : MonoBehaviour
 
         ws.OnMessage += (sender, e) =>
         {
-            Debug.Log("Received: " + e.Data);
+            JObject json = JObject.Parse(e.Data);
+            string text = (string)json["text"];
+            Debug.Log("Received: " + text);
             // ここで受信したテキストを処理（例：UI表示など）
         };
 
@@ -140,19 +177,60 @@ public class WebSocketClient : MonoBehaviour
 }
 ```
 
-Unity側でWebSocketSharpライブラリを導入する必要があります。
+Unity 側で WebSocketSharp と Newtonsoft.Json ライブラリを導入する必要があります。
 
-## 4. システムの実行
+## 5. システムの実行
 
-1. コマンドプロンプトで以下のコマンドを実行し、Pythonスクリプトを起動します:
+1. コマンドプロンプトで以下のコマンドを実行し、Python スクリプトを起動します：
 
-```bash
+```
 python speech_to_text.py
 ```
 
-2. Unityプロジェクトを実行します。
+2. Unity プロジェクトを実行します。
 
-3. マイクに向かって話すと、リアルタイムで文字起こしが行われ、Unity側に送信されます。
+3. マイクに向かって話すと、リアルタイムで文字起こしが行われ、Unity 側に送信されます。
+
+## 6. GitHub での共有準備
+
+1. `.gitignore` ファイルを作成し、以下の内容を記述します：
+
+```
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+
+# Google Cloud API Key
+google_cloud_key.json
+
+# Unity
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+
+# IDE
+.vscode/
+.idea/
+
+# OS generated
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+```
+
+2. `README.md` ファイルを作成し、プロジェクトの説明、セットアップ手順、使用方法などを記述します。
+
+3. `LICENSE` ファイルを作成し、適切なライセンス（例：MIT ライセンス）を記述します。
 
 ## ディレクトリ構成
 
@@ -160,10 +238,13 @@ python speech_to_text.py
 project_root/
 │
 ├── speech_to_text.py
-├── deepspeech-0.9.3-models.pbmm
-└── deepspeech-0.9.3-models.scorer
+├── requirements.txt
+├── google_cloud_key.json
+├── .gitignore
+├── README.md
+└── LICENSE
 ```
 
-このシステムは、DeepSpeechを使用して完全無料で日本語のリアルタイム文字起こしを実現し、WebSocketを通じてUnityフロントエンドと通信を行います。マイクからの入力を3秒ごとに処理し、結果をJSON形式でUnityに送信します。DeepSpeechは軽量なモデルであり、GPUなしのノートPCでも比較的高速に動作します。環境設定から実装まで、一貫性のある手順で説明しました。必要に応じて、エラーハンドリングやUI実装などを追加することで、より堅牢なシステムを構築できます。
+このシステムは、Google Cloud Speech-to-Text APIを使用して、日本語のリアルタイム文字起こしを実現します。マイクからの入力をリアルタイムで処理し、結果を WebSocket を通じて Unity に送信します。APIキーは簡単に変更できるよう、別ファイルで管理しています。環境設定から実装、GitHub での共有準備まで、一貫性のある手順で説明しました。必要に応じて、エラーハンドリングや UI 実装などを追加することで、より堅牢なシステムを構築できます。
 
 ---

@@ -1,33 +1,30 @@
-# Python関連
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 venv/
-env/
-*.so
 
-# Google Cloud APIキー
-your-key-file.json
+# Google Cloud API Key
+google_cloud_key.json
 
-# 音声ファイル
-*.wav
-*.mp3
+# Unity
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
 
-# ログファイル
-*.log
-
-# OS生成ファイル
-.DS_Store
-Thumbs.db
-
-# エディタ生成ファイル
+# IDE
 .vscode/
 .idea/
-*.swp
-*.swo
 
-# Unityプロジェクトファイル（フロントエンド側にあるため）
-*.unity
-*.meta
-*.asset
-*.prefab
+# OS generated
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
